@@ -21,7 +21,9 @@ except ImportError:
 
 MQTT_BROKER = os.getenv("MQTT_BROKER", "localhost")
 MQTT_PORT = int(os.getenv("MQTT_PORT", "1883"))
-LIDAR_PORT = os.getenv("LIDAR_PORT", "/dev/ttyUSB0")
+LIDAR_PORT = os.getenv("LIDAR_PORT", "/dev/ttyAMA0")
+LIDAR_BAUD = int(os.getenv("LIDAR_BAUD", "230400"))
+LIDAR_OFFSET_DEG = float(os.getenv("LIDAR_OFFSET_DEG", "90.0"))
 SIMULATE = os.getenv("LIDAR_SIMULATE", "false").lower() in ("true", "1", "yes")
 
 driver = None
@@ -58,7 +60,12 @@ def main():
             print(f"  ⚠️ MQTT non disponibile ({e}). Esecuzione standalone.")
 
     # 2. Inizializzazione Hardware / Simulatore
-    driver = LidarDriver(port=LIDAR_PORT, simulated=SIMULATE)
+    driver = LidarDriver(
+        port=LIDAR_PORT,
+        baudrate=LIDAR_BAUD,
+        angle_offset_deg=LIDAR_OFFSET_DEG,
+        simulated=SIMULATE
+    )
     driver.connect()
 
     analyzer = SectorAnalyzer(warning_threshold_m=1.2, emergency_threshold_m=0.35)
