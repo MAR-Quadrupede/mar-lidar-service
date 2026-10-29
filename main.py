@@ -73,6 +73,7 @@ def main():
     print("[LIDAR-SERVICE] Pipeline di scansione attiva...")
 
     last_alert_time = 0.0
+    last_alert_state = False
 
     for scan in driver.iter_scans():
         if not running:
@@ -83,26 +84,37 @@ def main():
         analysis["timestamp"] = time.time()
 
         now = time.time()
-        # Se c'è un'anomalia/ostacolo, emetti evento di alert (limitato a max 5 Hz per non intasare)
-        if analysis["has_alert"] and (now - last_alert_time > 0.2):
+        # Payload completo con tutti gli 8 settori per la sensor fusion
+        alert_payload = {
+            "timestamp": now,
+            "has_alert": analysis["has_alert"],
+            "is_emergency": analysis["is_emergency"],
+            "theta": analysis.get("target_angle_deg", 0.0),
+            "sector": analysis.get("target_sector", "FRONT"),
+            "sector_en": analysis.get("target_sector_en", "FRONT"),
+            "dist_m": analysis.get("min_distance_m", 99.0),
+            "front_distance_m": analysis.get("front_distance_m", 99.0),
+            "sector_mins": analysis.get("sector_mins", {}),
+            "sector_mins_en": analysis.get("sector_mins_en", {})
+        }
+
+        # Pubblica a 5 Hz (o istantaneo se transizione di allerta)
+        if (analysis["has_alert"] != last_alert_state) or (now - last_alert_time > 0.2):
             last_alert_time = now
-            alert_payload = {
-                "timestamp": now,
-                "theta": analysis.get("target_angle_deg", 0.0),
-                "sector": analysis.get("target_sector", "FRONT"),
-                "dist_m": analysis.get("min_distance_m", 1.0),
-                "is_emergency": analysis["is_emergency"]
-            }
+            last_alert_state = analysis["has_alert"]
             if mqtt_client and mqtt_client.is_connected():
                 mqtt_client.publish("mar/lidar/alert", json.dumps(alert_payload))
-            print(f"  🚨 [LIDAR ALERT] Ostacolo a {alert_payload['dist_m']}m in settore {alert_payload['sector']} (θ={alert_payload['theta']}°)")
+                mqtt_client.publish("mar/lidar/telemetry", json.dumps(alert_payload))
+            if analysis["has_alert"]:
+                print(f"  🚨 [LIDAR ALERT] Ostacolo a {alert_payload['dist_m']}m in settore {alert_payload['sector']} (θ={alert_payload['theta']}°)")
 
-        # Pubblica scan point cloud compresso (campionamento ogni 5 gradi per dashboard)
+        # Pubblica scan point cloud compresso (campionamento ogni 4 gradi per dashboard)
         downsampled = [(round(a, 1), round(d, 2)) for a, d in scan if int(a) % 4 == 0]
         radar_payload = {
             "timestamp": now,
             "points": downsampled,
-            "sector_mins": analysis["sector_mins"]
+            "sector_mins": analysis["sector_mins"],
+            "front_distance_m": analysis.get("front_distance_m")
         }
 
         if mqtt_client and mqtt_client.is_connected():

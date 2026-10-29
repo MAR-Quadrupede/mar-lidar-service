@@ -46,7 +46,12 @@ class LidarDriver:
     def find_candidate_ports() -> List[str]:
         """Finds potential serial/UART ports on Raspberry Pi or development OS."""
         candidates = []
-        for pattern in ["/dev/ttyAMA*", "/dev/ttyACM*", "/dev/ttyUSB*", "/dev/cu.usb*"]:
+        patterns = [
+            "/dev/ttyAMA*", "/dev/ttyACM*", "/dev/ttyUSB*", "/dev/serial0",
+            "/dev/cu.usb*", "/dev/cu.wchusb*", "/dev/cu.SLAB*", "/dev/cu.usbmodem*",
+            "/dev/tty.usb*", "/dev/tty.wchusb*", "/dev/tty.SLAB*"
+        ]
+        for pattern in patterns:
             candidates.extend(glob.glob(pattern))
         return sorted(list(set(candidates)))
 
