@@ -172,8 +172,9 @@ class LidarDriver:
                     curr_angle = (point_angle + self.angle_offset_deg) % 360.0
                     dist_m = dist_mm / 1000.0
 
-                    if 0.05 <= dist_m <= 8.0 and intensity > 10:
-                        current_sweep.append((curr_angle, dist_m))
+                    # Intensity più alta = eco più affidabile (massima precisione utile)
+                    if 0.12 <= dist_m <= 12.0 and intensity >= 15:
+                        current_sweep.append((curr_angle, round(dist_m, 3)))
 
                 now = time.time()
                 if now - last_yield_time >= SWEEP_INTERVAL_SEC:

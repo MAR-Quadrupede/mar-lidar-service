@@ -108,13 +108,26 @@ def main():
             if analysis["has_alert"]:
                 print(f"  🚨 [LIDAR ALERT] Ostacolo a {alert_payload['dist_m']}m in settore {alert_payload['sector']} (θ={alert_payload['theta']}°)")
 
-        # Pubblica scan point cloud compresso (campionamento ogni 4 gradi per dashboard)
-        downsampled = [(round(a, 1), round(d, 2)) for a, d in scan if int(a) % 4 == 0]
+        # Point cloud densa: 1° bin (mediana) — più precisione, meno rumore multi-echo
+        bins: dict = {}
+        for a, d in scan:
+            if not (0.12 <= d <= 12.0):
+                continue
+            key = int(round(a)) % 360
+            bins.setdefault(key, []).append(d)
+        downsampled = []
+        for ang in sorted(bins.keys()):
+            vals = bins[ang]
+            # 20° percentile: cattura ostacolo vicino senza il singolo outlier
+            dist = float(sorted(vals)[max(0, len(vals) // 5)])
+            downsampled.append((float(ang), round(dist, 3)))
         radar_payload = {
             "timestamp": now,
             "points": downsampled,
+            "point_count": len(scan),
+            "cloud_count": len(downsampled),
             "sector_mins": analysis["sector_mins"],
-            "front_distance_m": analysis.get("front_distance_m")
+            "front_distance_m": analysis.get("front_distance_m"),
         }
 
         if mqtt_client and mqtt_client.is_connected():

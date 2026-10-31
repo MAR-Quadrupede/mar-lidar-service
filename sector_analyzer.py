@@ -86,7 +86,8 @@ class SectorAnalyzer:
         punti_settori: Dict[str, List[float]] = {s: [] for s in SETTORI_8}
 
         for angle, dist in points:
-            if 0.05 <= dist <= 12.0:
+            # Ignora eco sul corpo robot (<12cm) e fuori range utile
+            if 0.12 <= dist <= 12.0:
                 settore = self.determina_settore(angle)
                 punti_settori[settore].append(dist)
 
@@ -100,14 +101,20 @@ class SectorAnalyzer:
             pts = punti_settori[s]
             if len(pts) > 0:
                 puliti = pulisci_outlier(pts)
-                dist_med = float(np.median(puliti))
+                # Fronte: percentile basso (ostacolo). Laterali: mediana più stabile.
+                if s == "Fronte" and len(puliti) >= 5:
+                    dist_med = float(np.percentile(puliti, 20))
+                else:
+                    dist_med = float(np.median(puliti))
                 self.sector_timeouts[s] = 0
 
-                # EMA filter
-                if self.sector_memory[s] is None:
+                # EMA: più reattivo in avvicinamento, più lento in allontanamento
+                prev = self.sector_memory[s]
+                if prev is None:
                     self.sector_memory[s] = dist_med
                 else:
-                    self.sector_memory[s] = (self.ema_alpha * dist_med) + ((1.0 - self.ema_alpha) * self.sector_memory[s])
+                    a = self.ema_alpha if dist_med <= prev else max(0.12, self.ema_alpha * 0.45)
+                    self.sector_memory[s] = (a * dist_med) + ((1.0 - a) * prev)
 
                 dist_val = round(self.sector_memory[s], 2)
                 sector_mins[s] = dist_val
