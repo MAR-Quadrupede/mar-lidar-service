@@ -10,10 +10,21 @@ import sys
 import time
 import json
 import signal
+import numpy as np
 
 from lidar_driver import LidarDriver
 from sector_analyzer import SectorAnalyzer
 from slam_engine import LidarSlamEngine
+
+class NumpyEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, (np.floating, np.float32, np.float64)):
+            return float(obj)
+        if isinstance(obj, (np.integer, np.int32, np.int64)):
+            return int(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super().default(obj)
 
 try:
     import paho.mqtt.client as mqtt
@@ -123,13 +134,13 @@ def main():
 
         # Pubblica posa SLAM ad alta frequenza (~8 Hz)
         if mqtt_client and mqtt_client.is_connected():
-            mqtt_client.publish("mar/slam/pose", json.dumps(slam_res))
+            mqtt_client.publish("mar/slam/pose", json.dumps(slam_res, cls=NumpyEncoder))
 
         # Pubblica mappa globale con nuvola di punti della stanza a 2 Hz
         if (now - last_map_pub_time >= 0.5) and (mqtt_client and mqtt_client.is_connected()):
             last_map_pub_time = now
             map_payload = slam.get_full_map_payload()
-            mqtt_client.publish("mar/slam/map", json.dumps(map_payload))
+            mqtt_client.publish("mar/slam/map", json.dumps(map_payload, cls=NumpyEncoder))
 
         # Log periodico localizzazione spaziale ogni 3 secondi
         if now - last_slam_log_time >= 3.0:

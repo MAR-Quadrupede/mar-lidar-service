@@ -143,27 +143,29 @@ class LidarSlamEngine:
             t_est = q_mean - (p_mean @ R_est.T)
 
             # Aggiornamento posa con smorzamento
-            cx = (0.75 * t_est[0]) + (0.25 * cx)
-            cy = (0.75 * t_est[1]) + (0.25 * cy)
-            cth = (0.75 * d_th) + (0.25 * cth)
+            cx = float((0.75 * t_est[0]) + (0.25 * cx))
+            cy = float((0.75 * t_est[1]) + (0.25 * cy))
+            cth = float((0.75 * d_th) + (0.25 * cth))
 
-        return cx, cy, cth
+        return float(cx), float(cy), float(cth)
 
     def _integrate_into_map(self, world_points: np.ndarray, now: float):
         """Integra i punti registrati nel frame mondo nella spatial hash grid."""
         for p in world_points:
-            gx = int(round(p[0] / self.res))
-            gy = int(round(p[1] / self.res))
+            px = float(p[0])
+            py = float(p[1])
+            gx = int(round(px / self.res))
+            gy = int(round(py / self.res))
             k = (gx, gy)
             if k in self.spatial_map:
                 entry = self.spatial_map[k]
-                entry[0] += p[0]
-                entry[1] += p[1]
+                entry[0] += px
+                entry[1] += py
                 entry[2] += 1.0
-                entry[3] = now
+                entry[3] = float(now)
             else:
                 if len(self.spatial_map) < self.max_map_points:
-                    self.spatial_map[k] = [float(p[0]), float(p[1]), 1.0, now]
+                    self.spatial_map[k] = [px, py, 1.0, float(now)]
 
     def update_scan(
         self,
@@ -244,36 +246,36 @@ class LidarSlamEngine:
 
     def get_status(self) -> Dict[str, object]:
         """Restituisce telemetria di posa e metriche della stanza."""
-        th_deg = round(math.degrees(self.pose_theta) % 360.0, 1)
+        th_deg = round(float(math.degrees(self.pose_theta) % 360.0), 1)
 
         # Calcola bounding box della stanza mappata
         if self.spatial_map:
             keys = np.array(list(self.spatial_map.keys()), dtype=np.float32) * self.res
             min_x, min_y = float(np.min(keys[:, 0])), float(np.min(keys[:, 1]))
             max_x, max_y = float(np.max(keys[:, 0])), float(np.max(keys[:, 1]))
-            room_w = round(max_x - min_x, 2)
-            room_l = round(max_y - min_y, 2)
-            area_m2 = round(room_w * room_l, 2)
+            room_w = round(float(max_x - min_x), 2)
+            room_l = round(float(max_y - min_y), 2)
+            area_m2 = round(float(room_w * room_l), 2)
         else:
             min_x = min_y = max_x = max_y = room_w = room_l = area_m2 = 0.0
 
         return {
-            "x_m": round(self.pose_x, 3),
-            "y_m": round(self.pose_y, 3),
+            "x_m": round(float(self.pose_x), 3),
+            "y_m": round(float(self.pose_y), 3),
             "theta_deg": th_deg,
-            "linear_speed_mps": round(math.hypot(self.vx, self.vy), 2),
-            "angular_speed_dps": round(math.degrees(self.vtheta), 1),
-            "distance_traveled_m": round(self.total_distance_m, 2),
-            "map_points_count": len(self.spatial_map),
-            "trajectory_points": len(self.trajectory),
+            "linear_speed_mps": round(float(math.hypot(self.vx, self.vy)), 2),
+            "angular_speed_dps": round(float(math.degrees(self.vtheta)), 1),
+            "distance_traveled_m": round(float(self.total_distance_m), 2),
+            "map_points_count": int(len(self.spatial_map)),
+            "trajectory_points": int(len(self.trajectory)),
             "room_bounds_m": {
-                "min_x": round(min_x, 2),
-                "max_x": round(max_x, 2),
-                "min_y": round(min_y, 2),
-                "max_y": round(max_y, 2),
-                "width_m": room_w,
-                "length_m": room_l,
-                "area_m2": area_m2,
+                "min_x": round(float(min_x), 2),
+                "max_x": round(float(max_x), 2),
+                "min_y": round(float(min_y), 2),
+                "max_y": round(float(max_y), 2),
+                "width_m": float(room_w),
+                "length_m": float(room_l),
+                "area_m2": float(area_m2),
             }
         }
 
@@ -290,8 +292,8 @@ class LidarSlamEngine:
         sampled = []
         for i in range(0, len(pts_source), step):
             entry = pts_source[i]
-            x = round(entry[0] / entry[2], 2)
-            y = round(entry[1] / entry[2], 2)
+            x = round(float(entry[0] / entry[2]), 2)
+            y = round(float(entry[1] / entry[2]), 2)
             sampled.append([x, y])
             if len(sampled) >= max_points:
                 break
@@ -302,19 +304,19 @@ class LidarSlamEngine:
         status = self.get_status()
         cloud = self.get_downsampled_cloud()
         return {
-            "timestamp": time.time(),
+            "timestamp": float(time.time()),
             "pose": {
-                "x": status["x_m"],
-                "y": status["y_m"],
-                "theta": status["theta_deg"],
+                "x": float(status["x_m"]),
+                "y": float(status["y_m"]),
+                "theta": float(status["theta_deg"]),
             },
             "speed": {
-                "linear": status["linear_speed_mps"],
-                "angular": status["angular_speed_dps"],
-                "distance": status["distance_traveled_m"],
+                "linear": float(status["linear_speed_mps"]),
+                "angular": float(status["angular_speed_dps"]),
+                "distance": float(status["distance_traveled_m"]),
             },
             "room": status["room_bounds_m"],
-            "trajectory": [[p[0], p[1]] for p in self.trajectory[-150:]],
-            "point_count": len(cloud),
+            "trajectory": [[float(p[0]), float(p[1])] for p in self.trajectory[-150:]],
+            "point_count": int(len(cloud)),
             "cloud": cloud,
         }
