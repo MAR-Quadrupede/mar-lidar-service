@@ -127,8 +127,8 @@ def main():
             last_alert_time = now
             last_alert_state = analysis["has_alert"]
             if mqtt_client and mqtt_client.is_connected():
-                mqtt_client.publish("mar/lidar/alert", json.dumps(alert_payload))
-                mqtt_client.publish("mar/lidar/telemetry", json.dumps(alert_payload))
+                mqtt_client.publish("mar/lidar/alert", json.dumps(alert_payload, cls=NumpyEncoder))
+                mqtt_client.publish("mar/lidar/telemetry", json.dumps(alert_payload, cls=NumpyEncoder))
             if analysis["has_alert"]:
                 print(f"  🚨 [LIDAR ALERT] Ostacolo a {alert_payload['dist_m']}m in settore {alert_payload['sector']} (θ={alert_payload['theta']}°)")
 
@@ -180,7 +180,7 @@ def main():
         }
 
         if mqtt_client and mqtt_client.is_connected():
-            mqtt_client.publish("mar/lidar/scan", json.dumps(radar_payload))
+            mqtt_client.publish("mar/lidar/scan", json.dumps(radar_payload, cls=NumpyEncoder))
 
 
 if __name__ == "__main__":
