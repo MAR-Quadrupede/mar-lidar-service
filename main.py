@@ -13,6 +13,7 @@ import signal
 
 from lidar_driver import LidarDriver
 from sector_analyzer import SectorAnalyzer
+from slam_engine import LidarSlamEngine
 
 try:
     import paho.mqtt.client as mqtt
@@ -69,21 +70,28 @@ def main():
     driver.connect()
 
     analyzer = SectorAnalyzer(warning_threshold_m=1.2, emergency_threshold_m=0.35)
+    slam = LidarSlamEngine(grid_resolution_m=0.05)
 
-    print("[LIDAR-SERVICE] Pipeline di scansione attiva...")
+    print("[LIDAR-SERVICE] Pipeline di scansione e motore SLAM 2D attivi...")
 
     last_alert_time = 0.0
     last_alert_state = False
+    last_map_pub_time = 0.0
+    last_slam_log_time = 0.0
 
     for scan in driver.iter_scans():
         if not running:
             break
 
-        # Analisi spaziale per settori
-        analysis = analyzer.analyze_scan(scan)
-        analysis["timestamp"] = time.time()
-
         now = time.time()
+
+        # 1. Aggiornamento continuo SLAM: stima posa (X, Y, Theta) e mappatura globale della stanza
+        slam_res = slam.update_scan(scan, now=now)
+
+        # 2. Analisi spaziale per settori
+        analysis = analyzer.analyze_scan(scan)
+        analysis["timestamp"] = now
+
         # Payload completo con tutti gli 8 settori per la sensor fusion
         alert_payload = {
             "timestamp": now,
@@ -95,10 +103,15 @@ def main():
             "dist_m": analysis.get("min_distance_m", 99.0),
             "front_distance_m": analysis.get("front_distance_m", 99.0),
             "sector_mins": analysis.get("sector_mins", {}),
-            "sector_mins_en": analysis.get("sector_mins_en", {})
+            "sector_mins_en": analysis.get("sector_mins_en", {}),
+            "pose": {
+                "x_m": slam_res["x_m"],
+                "y_m": slam_res["y_m"],
+                "theta_deg": slam_res["theta_deg"]
+            }
         }
 
-        # Pubblica a 5 Hz (o istantaneo se transizione di allerta)
+        # Pubblica alert a 5 Hz (o istantaneo se transizione di allerta)
         if (analysis["has_alert"] != last_alert_state) or (now - last_alert_time > 0.2):
             last_alert_time = now
             last_alert_state = analysis["has_alert"]
@@ -107,6 +120,25 @@ def main():
                 mqtt_client.publish("mar/lidar/telemetry", json.dumps(alert_payload))
             if analysis["has_alert"]:
                 print(f"  🚨 [LIDAR ALERT] Ostacolo a {alert_payload['dist_m']}m in settore {alert_payload['sector']} (θ={alert_payload['theta']}°)")
+
+        # Pubblica posa SLAM ad alta frequenza (~8 Hz)
+        if mqtt_client and mqtt_client.is_connected():
+            mqtt_client.publish("mar/slam/pose", json.dumps(slam_res))
+
+        # Pubblica mappa globale con nuvola di punti della stanza a 2 Hz
+        if (now - last_map_pub_time >= 0.5) and (mqtt_client and mqtt_client.is_connected()):
+            last_map_pub_time = now
+            map_payload = slam.get_full_map_payload()
+            mqtt_client.publish("mar/slam/map", json.dumps(map_payload))
+
+        # Log periodico localizzazione spaziale ogni 3 secondi
+        if now - last_slam_log_time >= 3.0:
+            last_slam_log_time = now
+            bounds = slam_res["room_bounds_m"]
+            print(
+                f"  📍 [SLAM LOCALIZZAZIONE] X={slam_res['x_m']:+0.2f}m Y={slam_res['y_m']:+0.2f}m θ={slam_res['theta_deg']}° | "
+                f"Mappa: {slam_res['map_points_count']} punti (Stanza: {bounds['width_m']:.1f}m x {bounds['length_m']:.1f}m, Area: {bounds['area_m2']:.1f}m²)"
+            )
 
         # Point cloud densa: 1° bin (mediana) — più precisione, meno rumore multi-echo
         bins: dict = {}
@@ -128,6 +160,12 @@ def main():
             "cloud_count": len(downsampled),
             "sector_mins": analysis["sector_mins"],
             "front_distance_m": analysis.get("front_distance_m"),
+            "slam": {
+                "x_m": slam_res["x_m"],
+                "y_m": slam_res["y_m"],
+                "theta_deg": slam_res["theta_deg"],
+                "dist_traveled_m": slam_res["distance_traveled_m"]
+            }
         }
 
         if mqtt_client and mqtt_client.is_connected():
