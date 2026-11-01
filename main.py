@@ -23,7 +23,7 @@ MQTT_BROKER = os.getenv("MQTT_BROKER", "localhost")
 MQTT_PORT = int(os.getenv("MQTT_PORT", "1883"))
 LIDAR_PORT = os.getenv("LIDAR_PORT", "/dev/ttyAMA0")
 LIDAR_BAUD = int(os.getenv("LIDAR_BAUD", "230400"))
-LIDAR_OFFSET_DEG = float(os.getenv("LIDAR_OFFSET_DEG", "90.0"))
+LIDAR_OFFSET_DEG = float(os.getenv("LIDAR_OFFSET_DEG", "0.0"))
 SIMULATE = os.getenv("LIDAR_SIMULATE", "false").lower() in ("true", "1", "yes")
 
 driver = None
