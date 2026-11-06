@@ -39,6 +39,10 @@ def pulisci_outlier(dati: List[float]) -> List[float]:
     return puliti if len(puliti) > 0 else dati
 
 
+MIN_BODY_CLEARANCE_M = 0.05
+MAX_LIDAR_RANGE_M = 12.0
+ARROW_HEADING_HALF_DEG = 15.0
+
 class SectorAnalyzer:
     """
     Analyzes polar coordinates (angle_deg, dist_m) across 8 sectors with EMA smoothing.
@@ -47,14 +51,15 @@ class SectorAnalyzer:
     def __init__(
         self,
         warning_threshold_m: float = 1.2,
-        emergency_threshold_m: float = 0.30,
-        ema_alpha: float = 0.35
+        emergency_threshold_m: float = 0.35,
+        ema_alpha: float = 0.45
     ):
         self.warning_threshold_m = warning_threshold_m
         self.emergency_threshold_m = emergency_threshold_m
         self.ema_alpha = ema_alpha
         self.sector_memory: Dict[str, Optional[float]] = {s: None for s in SETTORI_8}
         self.sector_timeouts: Dict[str, int] = {s: 0 for s in SETTORI_8}
+        self._direct_front_memory: Optional[float] = None
 
     @staticmethod
     def determina_settore(angolo_deg: float) -> str:
@@ -84,36 +89,39 @@ class SectorAnalyzer:
         Returns closest obstacle, per-sector filtered min distances, and trigger decision.
         """
         punti_settori: Dict[str, List[float]] = {s: [] for s in SETTORI_8}
+        direct_front_pts: List[float] = []
 
         for angle, dist in points:
-            # Ignora eco sul corpo robot (<12cm) e fuori range utile
-            if 0.12 <= dist <= 12.0:
+            # Ignora eco sul corpo del robot (< 22cm: fotocamere, cavi, supporti)
+            if MIN_BODY_CLEARANCE_M <= dist <= MAX_LIDAR_RANGE_M:
                 settore = self.determina_settore(angle)
                 punti_settori[settore].append(dist)
+                # Dritto perfetto lungo la freccia fisica (±15° centrato su 0°)
+                a = angle % 360.0
+                if a <= ARROW_HEADING_HALF_DEG or a >= (360.0 - ARROW_HEADING_HALF_DEG):
+                    direct_front_pts.append(dist)
 
         sector_mins: Dict[str, Optional[float]] = {}
         sector_mins_en: Dict[str, Optional[float]] = {}
         min_overall_dist = 99.0
         closest_sector = "Fronte"
-        target_angle = 0.0
 
         for s in SETTORI_8:
             pts = punti_settori[s]
             if len(pts) > 0:
                 puliti = pulisci_outlier(pts)
-                # Fronte: percentile basso (ostacolo). Laterali: mediana più stabile.
-                if s == "Fronte" and len(puliti) >= 5:
-                    dist_med = float(np.percentile(puliti, 20))
-                else:
-                    dist_med = float(np.median(puliti))
+                dist_med = float(np.median(puliti))
                 self.sector_timeouts[s] = 0
 
-                # EMA: più reattivo in avvicinamento, più lento in allontanamento
                 prev = self.sector_memory[s]
                 if prev is None:
                     self.sector_memory[s] = dist_med
                 else:
-                    a = self.ema_alpha if dist_med <= prev else max(0.12, self.ema_alpha * 0.45)
+                    # Se la distanza aumenta bruscamente (ostacolo rimosso), adatta rapidamente
+                    if dist_med > prev:
+                        a = 0.50 if (dist_med - prev) < 1.0 else 0.75
+                    else:
+                        a = self.ema_alpha
                     self.sector_memory[s] = (a * dist_med) + ((1.0 - a) * prev)
 
                 dist_val = round(self.sector_memory[s], 2)
@@ -125,7 +133,8 @@ class SectorAnalyzer:
                     closest_sector = s
             else:
                 self.sector_timeouts[s] += 1
-                if self.sector_timeouts[s] > 6:
+                # Timeout più reattivo (3 sweep = ~300ms senza ostacolo)
+                if self.sector_timeouts[s] > 3:
                     self.sector_memory[s] = None
                     sector_mins[s] = None
                     sector_mins_en[SECTOR_MAP_EN[s]] = None
@@ -137,22 +146,33 @@ class SectorAnalyzer:
                     sector_mins[s] = None
                     sector_mins_en[SECTOR_MAP_EN[s]] = None
 
+        # Dritto esatto lungo la freccia fisica con smoothing EMA
+        if direct_front_pts:
+            direct_clean = pulisci_outlier(direct_front_pts)
+            direct_med = float(np.median(direct_clean))
+            if self._direct_front_memory is None:
+                self._direct_front_memory = direct_med
+            else:
+                a_df = self.ema_alpha if direct_med <= self._direct_front_memory else 0.55
+                self._direct_front_memory = (a_df * direct_med) + ((1.0 - a_df) * self._direct_front_memory)
+            front_dist = round(float(self._direct_front_memory), 2)
+        else:
+            front_dist = sector_mins.get("Fronte") or 99.0
+
         has_alert = min_overall_dist < self.warning_threshold_m
         is_emergency = min_overall_dist < self.emergency_threshold_m
 
-        # Estimate target theta towards closest obstacle
-        if closest_sector == "Fronte":
-            target_angle = 0.0
-        elif closest_sector == "Front-DX":
-            target_angle = 45.0
-        elif closest_sector == "Destra":
-            target_angle = 90.0
-        elif closest_sector == "Front-SX":
-            target_angle = -45.0
-        elif closest_sector == "Sinistra":
-            target_angle = -90.0
-
-        front_dist = sector_mins.get("Fronte") or 99.0
+        sector_angles = {
+            "Fronte": 0.0,
+            "Front-DX": 45.0,
+            "Destra": 90.0,
+            "Retro-DX": 135.0,
+            "Retro": 180.0,
+            "Retro-SX": -135.0,
+            "Sinistra": -90.0,
+            "Front-SX": -45.0,
+        }
+        target_angle = sector_angles.get(closest_sector, 0.0)
 
         return {
             "has_alert": has_alert,

@@ -30,7 +30,7 @@ class LidarDriver:
         self,
         port: str = "/dev/ttyAMA0",
         baudrate: int = 230400,
-        angle_offset_deg: float = 90.0,
+        angle_offset_deg: float = 180.0,
         simulated: bool = False
     ):
         self.port = port
@@ -143,7 +143,8 @@ class LidarDriver:
 
         while self.is_connected:
             try:
-                if ser.in_waiting > 400:
+                # Evita overflow senza scartare pacchetti frequenti (buffer seriale tipico 4096B)
+                if ser.in_waiting > 3000:
                     ser.reset_input_buffer()
 
                 byte_head = ser.read(1)
@@ -168,17 +169,17 @@ class LidarDriver:
                     intensity = packet[base_idx + 2]
 
                     point_angle = (start_angle + (i * angle_step)) % 360.0
-                    # Apply physical robot mounting offset (e.g. +90°)
+                    # Applica offset fisico montaggio (default 180° per allineamento frontale)
                     curr_angle = (point_angle + self.angle_offset_deg) % 360.0
                     dist_m = dist_mm / 1000.0
 
-                    # Intensity più alta = eco più affidabile (massima precisione utile)
-                    if 0.12 <= dist_m <= 12.0 and intensity >= 15:
+                    # Filtro anti-rumore carrozzeria / supporti (< 5cm)
+                    if 0.05 <= dist_m <= 12.0:
                         current_sweep.append((curr_angle, round(dist_m, 3)))
 
                 now = time.time()
                 if now - last_yield_time >= SWEEP_INTERVAL_SEC:
-                    if len(current_sweep) > 20:
+                    if len(current_sweep) >= 15:
                         yield current_sweep
                     current_sweep = []
                     last_yield_time = now
@@ -193,25 +194,28 @@ class LidarDriver:
             for scan_raw in self.rplidar_conn.iter_scans():
                 scan = []
                 for q, a, d_mm in scan_raw:
-                    if q > 0 and d_mm > 50:
+                    # Filtra riflessi interni corpo robot / cavi / staffe (< 50mm)
+                    if q > 0 and 50 <= d_mm <= 12000:
                         adjusted_angle = (a + self.angle_offset_deg) % 360.0
-                        scan.append((float(adjusted_angle), d_mm / 1000.0))
-                yield scan
+                        scan.append((float(adjusted_angle), round(d_mm / 1000.0, 3)))
+                if len(scan) >= 15:
+                    yield scan
         except Exception as e:
             print(f"[LIDAR-DRIVER] Errore stream RPLidar: {e}")
 
     def _iter_simulated_scans(self) -> Generator[List[Tuple[float, float]], None, None]:
         """Generates realistic synthetic 360-degree point cloud for headless test."""
-        simulated_obstacle_angle = 35.0
         while self.is_connected:
             scan = []
-            simulated_obstacle_angle = (simulated_obstacle_angle + 0.8) % 360.0
             for a in range(0, 360, 2):
-                dist = 3.5 + 0.2 * math.sin(math.radians(a * 4)) + random.uniform(-0.04, 0.04)
-                diff = abs((a - simulated_obstacle_angle + 180) % 360 - 180)
-                if diff < 15:
-                    dist = 0.75 + 0.05 * random.uniform(-1, 1)
-
+                # Corridoio/stanza realistica: fronte aperto a ~3.0m, pareti laterali a 2.5m, retro a ~1.8m
+                rad = math.radians(a)
+                # Modello rettangolare stanza (6m x 5m)
+                # Fronte a 0° (+X): ~3.0m
+                dx = 3.0 / max(0.2, math.cos(rad)) if -45 <= a <= 45 or a >= 315 else 99.0
+                dist = 3.0 + 0.15 * math.sin(rad * 2) + random.uniform(-0.03, 0.03)
+                if dist < 0.22:
+                    continue
                 scan.append((float(a), round(dist, 3)))
             yield scan
             time.sleep(0.1)  # 10 Hz rate

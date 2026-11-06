@@ -113,6 +113,7 @@ def main():
             "sector_en": analysis.get("target_sector_en", "FRONT"),
             "dist_m": analysis.get("min_distance_m", 99.0),
             "front_distance_m": analysis.get("front_distance_m", 99.0),
+            "point_count": len(scan),
             "sector_mins": analysis.get("sector_mins", {}),
             "sector_mins_en": analysis.get("sector_mins_en", {}),
             "pose": {
@@ -122,22 +123,32 @@ def main():
             }
         }
 
-        # Pubblica alert a 5 Hz (o istantaneo se transizione di allerta)
-        if (analysis["has_alert"] != last_alert_state) or (now - last_alert_time > 0.2):
-            last_alert_time = now
-            last_alert_state = analysis["has_alert"]
-            if mqtt_client and mqtt_client.is_connected():
-                mqtt_client.publish("mar/lidar/alert", json.dumps(alert_payload, cls=NumpyEncoder))
-                mqtt_client.publish("mar/lidar/telemetry", json.dumps(alert_payload, cls=NumpyEncoder))
-            if analysis["has_alert"]:
-                print(f"  🚨 [LIDAR ALERT] Ostacolo a {alert_payload['dist_m']}m in settore {alert_payload['sector']} (θ={alert_payload['theta']}°)")
+        # Payload nuvola di punti per Radar e Dashboard
+        scan_payload = {
+            "timestamp": now,
+            "point_count": len(scan),
+            "points": [[round(float(a), 1), round(float(d), 3)] for a, d in scan],
+            "front_distance_m": analysis.get("front_distance_m", 99.0),
+            "sector_mins": analysis.get("sector_mins", {}),
+            "sector_mins_en": analysis.get("sector_mins_en", {}),
+        }
 
-        # Pubblica posa SLAM ad alta frequenza (~8 Hz)
+        # Invio immediato ad alta reattività a MQTT (zero lag verso Decision Engine e Gateway)
         if mqtt_client and mqtt_client.is_connected():
+            mqtt_client.publish("mar/lidar/alert", json.dumps(alert_payload, cls=NumpyEncoder))
+            mqtt_client.publish("mar/lidar/telemetry", json.dumps(alert_payload, cls=NumpyEncoder))
+            mqtt_client.publish("mar/lidar/scan", json.dumps(scan_payload, cls=NumpyEncoder))
             mqtt_client.publish("mar/slam/pose", json.dumps(slam_res, cls=NumpyEncoder))
 
-        # Pubblica mappa globale con nuvola di punti della stanza a 2 Hz
-        if (now - last_map_pub_time >= 0.5) and (mqtt_client and mqtt_client.is_connected()):
+        if analysis["has_alert"] and (analysis["has_alert"] != last_alert_state or now - last_alert_time > 1.0):
+            last_alert_time = now
+            last_alert_state = analysis["has_alert"]
+            print(f"  🚨 [LIDAR ALERT] Ostacolo a {alert_payload['dist_m']}m in settore {alert_payload['sector']} (θ={alert_payload['theta']}°)")
+        elif not analysis["has_alert"]:
+            last_alert_state = False
+
+        # Pubblica mappa globale con nuvola di punti della stanza a ~2 Hz
+        if (now - last_map_pub_time >= 0.4) and (mqtt_client and mqtt_client.is_connected()):
             last_map_pub_time = now
             map_payload = slam.get_full_map_payload()
             mqtt_client.publish("mar/slam/map", json.dumps(map_payload, cls=NumpyEncoder))
