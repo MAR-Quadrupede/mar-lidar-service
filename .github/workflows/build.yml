@@ -24,8 +24,14 @@ jobs:
         run: |
           if command -v kubectl >/dev/null 2>&1 && kubectl cluster-info >/dev/null 2>&1; then
             echo "Applying update to Kubernetes deployment..."
+            kubectl set env deployment/mar-lidar-service LIDAR_SIMULATE=false LIDAR_PORT=/dev/ttyAMA0 LIDAR_BAUD=230400 LIDAR_OFFSET_DEG=90.0 -n mar-system || true
             kubectl rollout restart deployment/mar-lidar-service -n mar-system || true
             kubectl rollout status deployment/mar-lidar-service -n mar-system --timeout=60s || true
+            echo "=== Pi Hardware Serial Devices ==="
+            ls -la /dev/serial* /dev/ttyAMA* /dev/ttyUSB* /dev/ttyACM* 2>/dev/null || true
+            echo "=== mar-lidar-service Logs ==="
+            sleep 3
+            kubectl logs deployment/mar-lidar-service -n mar-system --tail=30 || true
           else
             echo "Kubernetes (K3s) not available yet. Image cached in local Docker daemon."
           fi
