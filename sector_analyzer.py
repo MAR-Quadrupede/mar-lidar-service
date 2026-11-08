@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
 M.A.R. — LiDAR Sector Analyzer & Proximity Trigger
-Segments 360-degree LiDAR point clouds into 8 operational sectors (Fronte, Front-DX, etc.),
-applies statistical IQR outlier filtering, Exponential Moving Average (EMA) smoothing,
-and triggers active perception saccades and emergency obstacle stops.
+Segments 360-degree LiDAR point clouds into 8 operational sectors (Fronte, Front-DX, etc.).
+The distance of a sector is the near confirmed return (~10th percentile), not the median:
+a sheet or a hand that covers only part of the 45° wedge must move the number.
+EMA smoothing still rejects a single speckle, and a new close obstacle is applied in one scan.
 """
 
 from typing import List, Tuple, Dict, Optional
@@ -37,6 +38,20 @@ def pulisci_outlier(dati: List[float]) -> List[float]:
     lim_sup = q75 + (1.2 * iqr)
     puliti = [x for x in dati if lim_inf <= x <= lim_sup]
     return puliti if len(puliti) > 0 else dati
+
+
+def near_distance_m(dati: List[float]) -> float:
+    """Ostacolo più vicino confermato, non la mediana del settore.
+
+    Un foglio copre solo una fetta dei 45°: la mediana (e il filtro IQR) restano
+    sul muro dietro e il foglio sparisce. Si usa un percentile basso (~10°),
+    scartando il singolo ritorno più corto così uno speckle isolato non scatena lo stop.
+    """
+    s = sorted(float(x) for x in dati)
+    if len(s) <= 2:
+        return s[0]
+    idx = max(1, int(round(0.10 * (len(s) - 1))))
+    return s[min(idx, len(s) - 1)]
 
 
 MIN_BODY_CLEARANCE_M = 0.05
@@ -109,20 +124,22 @@ class SectorAnalyzer:
         for s in SETTORI_8:
             pts = punti_settori[s]
             if len(pts) > 0:
-                puliti = pulisci_outlier(pts)
-                dist_med = float(np.median(puliti))
+                dist_near = near_distance_m(pts)
                 self.sector_timeouts[s] = 0
 
                 prev = self.sector_memory[s]
                 if prev is None:
-                    self.sector_memory[s] = dist_med
+                    self.sector_memory[s] = dist_near
                 else:
-                    # Se la distanza aumenta bruscamente (ostacolo rimosso), adatta rapidamente
-                    if dist_med > prev:
-                        a = 0.50 if (dist_med - prev) < 1.0 else 0.75
+                    # Un ostacolo che entra (foglio, mano) deve comparire subito.
+                    # Se la distanza aumenta, si segue comunque in fretta.
+                    if dist_near + 0.12 < prev:
+                        a = 0.90
+                    elif dist_near > prev:
+                        a = 0.50 if (dist_near - prev) < 1.0 else 0.75
                     else:
                         a = self.ema_alpha
-                    self.sector_memory[s] = (a * dist_med) + ((1.0 - a) * prev)
+                    self.sector_memory[s] = (a * dist_near) + ((1.0 - a) * prev)
 
                 dist_val = round(self.sector_memory[s], 2)
                 sector_mins[s] = dist_val
@@ -148,13 +165,17 @@ class SectorAnalyzer:
 
         # Dritto esatto lungo la freccia fisica con smoothing EMA
         if direct_front_pts:
-            direct_clean = pulisci_outlier(direct_front_pts)
-            direct_med = float(np.median(direct_clean))
+            direct_near = near_distance_m(direct_front_pts)
             if self._direct_front_memory is None:
-                self._direct_front_memory = direct_med
+                self._direct_front_memory = direct_near
             else:
-                a_df = self.ema_alpha if direct_med <= self._direct_front_memory else 0.55
-                self._direct_front_memory = (a_df * direct_med) + ((1.0 - a_df) * self._direct_front_memory)
+                if direct_near + 0.12 < self._direct_front_memory:
+                    a_df = 0.90
+                elif direct_near <= self._direct_front_memory:
+                    a_df = self.ema_alpha
+                else:
+                    a_df = 0.55
+                self._direct_front_memory = (a_df * direct_near) + ((1.0 - a_df) * self._direct_front_memory)
             front_dist = round(float(self._direct_front_memory), 2)
         else:
             front_dist = sector_mins.get("Fronte") or 99.0
