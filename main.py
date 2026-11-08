@@ -44,6 +44,15 @@ IMU_YAW_MAX_AGE_S = float(os.getenv("LIDAR_IMU_MAX_AGE_S", "0.5"))
 _imu_state = {"yaw_deg": None, "ts": 0.0}
 
 
+def _on_mqtt_connect(client, userdata, flags, rc, properties=None):
+    code = getattr(rc, "value", rc)
+    if code == 0:
+        client.subscribe("mar/imu/telemetry")
+        print(f"  ✓ Connesso a MQTT Broker ({MQTT_BROKER}:{MQTT_PORT}) — mar/imu/telemetry sottoscritto")
+    else:
+        print(f"  ⚠️ MQTT connect rifiutato (rc={rc})")
+
+
 def _on_mqtt_message(client, userdata, msg):
     try:
         data = json.loads(msg.payload.decode("utf-8", "ignore"))
@@ -90,15 +99,18 @@ def main():
     # 1. Connessione MQTT
     mqtt_client = None
     if mqtt:
+        # connect_async + loop_start → retry infinito (DNS del cluster lento al boot) e
+        # re-subscribe in on_connect ad ogni riconnessione.
         try:
+            mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="mar-lidar-service")
+        except Exception:
             mqtt_client = mqtt.Client(client_id="mar-lidar-service")
-            mqtt_client.on_message = _on_mqtt_message
-            mqtt_client.connect(MQTT_BROKER, MQTT_PORT, 60)
-            mqtt_client.subscribe("mar/imu/telemetry")
-            mqtt_client.loop_start()
-            print(f"  ✓ Connesso a MQTT Broker ({MQTT_BROKER}:{MQTT_PORT})")
-        except Exception as e:
-            print(f"  ⚠️ MQTT non disponibile ({e}). Esecuzione standalone.")
+        mqtt_client.on_connect = _on_mqtt_connect
+        mqtt_client.on_message = _on_mqtt_message
+        mqtt_client.reconnect_delay_set(min_delay=1, max_delay=10)
+        mqtt_client.connect_async(MQTT_BROKER, MQTT_PORT, 60)
+        mqtt_client.loop_start()
+        print(f"  ✓ MQTT loop avviato verso {MQTT_BROKER}:{MQTT_PORT} (retry automatico)")
 
     # 2. Inizializzazione Hardware / Simulatore
     driver = LidarDriver(
@@ -133,6 +145,8 @@ def main():
             "scan_hz": round(scan_hz, 1),
             "slam_points": slam.get_status()["map_points_count"],
             "imu_prior": _imu_yaw_for_slam(now) is not None,
+            "rx_bytes": int(getattr(driver, "last_rx_bytes", 0) or 0),
+            "probe": getattr(driver, "last_probe_summary", "") or "",
         }))
 
     # Stato "offline" finché il sensore non parla (la dashboard distingue LiDAR assente da silenzio MQTT)

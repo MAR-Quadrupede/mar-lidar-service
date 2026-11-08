@@ -41,6 +41,8 @@ class LidarDriver:
         self.serial_conn: Optional[serial.Serial] = None
         self.rplidar_conn: Optional[RPLidar] = None
         self.is_connected = False
+        self.last_rx_bytes = 0
+        self.last_probe_summary = ""
 
     @staticmethod
     def find_candidate_ports(preferred: str = "/dev/ttyAMA0", probe_usb: Optional[bool] = None) -> List[str]:
@@ -57,7 +59,7 @@ class LidarDriver:
         if preferred and os.path.exists(preferred):
             candidates.append(preferred)
 
-        native = ["/dev/ttyAMA0", "/dev/serial0", "/dev/ttyAMA10", "/dev/ttyS0"]
+        native = ["/dev/ttyAMA0", "/dev/serial0", "/dev/ttyS0"]
         for kd in native:
             if os.path.exists(kd) and kd not in candidates:
                 candidates.append(kd)
@@ -80,9 +82,22 @@ class LidarDriver:
         # /dev/serial0 è di solito un symlink a ttyAMA0: evita di sondare due volte lo stesso device
         seen_real = set()
         unique: List[str] = []
+        pref_real = ""
+        if preferred and os.path.exists(preferred):
+            try:
+                pref_real = os.path.realpath(preferred)
+            except Exception:
+                pref_real = preferred
         for p in candidates:
             if os.path.isdir(p):  # es. /dev/serial/ (directory by-id/by-path), non una porta
                 continue
+            # ttyAMA10 = UART debug a 3 pin del Pi 5, NON l'header 40 pin del HAT OKdo
+            if os.path.basename(p) == "ttyAMA10":
+                try:
+                    if os.path.realpath(p) != pref_real:
+                        continue
+                except Exception:
+                    continue
             try:
                 real = os.path.realpath(p)
             except Exception:
@@ -105,15 +120,16 @@ class LidarDriver:
             ser = serial.Serial(port_name, baud, timeout=0.04, exclusive=True)
             ser.reset_input_buffer()
 
+            buf = bytearray()
             start_t = time.time()
-            # Probe for up to 2.0s
             while time.time() - start_t < 2.0:
-                if ser.in_waiting >= 47:
-                    b_head = ser.read(1)
-                    if b_head and b_head[0] == 0x54:
-                        packet = ser.read(46)
-                        if len(packet) == 46 and packet[0] == 0x2C:
-                            # Confermato protocollo LD06: Header=0x54, VerLen=0x2C
+                n = ser.in_waiting
+                if n:
+                    buf.extend(ser.read(n))
+                    i = 0
+                    while i + 47 <= len(buf):
+                        if buf[i] == 0x54 and buf[i + 1] == 0x2C:
+                            packet = buf[i + 1:i + 47]
                             start_angle = (((packet[4] << 8) | packet[3]) / 100.0) % 360.0
                             end_angle = (((packet[42] << 8) | packet[41]) / 100.0) % 360.0
                             if 0.0 <= start_angle <= 360.0 and 0.0 <= end_angle <= 360.0:
@@ -122,11 +138,18 @@ class LidarDriver:
                                 self.baudrate = baud
                                 self.driver_type = "ld06"
                                 self.is_connected = True
+                                self.last_rx_bytes = len(buf)
                                 print(f"  ✓ [LIDAR-DRIVER] Sensore LD06/OKdo HAT confermato e sincronizzato su {port_name} ({baud} baud)!")
                                 return True
+                        i += 1
+                    if len(buf) > 4096:
+                        buf = buf[-64:]
                 else:
                     time.sleep(0.01)
 
+            self.last_rx_bytes = max(self.last_rx_bytes, len(buf))
+            head = bytes(buf[:12]).hex(" ") if buf else ""
+            self.last_probe_summary = f"{port_name}@{baud}:{len(buf)}B" + (f" head={head}" if head else "")
             ser.close()
             return False
         except Exception as e:
@@ -152,6 +175,8 @@ class LidarDriver:
             probe_usb = True
         ports_to_try = self.find_candidate_ports(self.port, probe_usb=probe_usb)
         self._connect_attempts = getattr(self, "_connect_attempts", 0) + 1
+        self.last_rx_bytes = 0
+        self.last_probe_summary = ""
         if self._connect_attempts == 1 or self._connect_attempts % 10 == 0:
             print(f"[LIDAR-DRIVER] Scansione porte hardware candidate (tentativo {self._connect_attempts}): {ports_to_try}")
 
@@ -185,8 +210,12 @@ class LidarDriver:
         # 4. Nessun sensore trovato (log al primo tentativo e poi ogni 10 per non inondare i log)
         if not self.simulated:
             if self._connect_attempts == 1 or self._connect_attempts % 10 == 0:
-                print(f"  ⚠️ [LIDAR-DRIVER] Nessun pacchetto LiDAR sulle porte {ports_to_try} "
-                      f"(tentativo {self._connect_attempts}): sensore spento/scollegato? Riprovo con backoff...")
+                detail = self.last_probe_summary or "nessun byte"
+                print(f"  ⚠️ [LIDAR-DRIVER] Nessun pacchetto 0x54 sulle porte {ports_to_try} "
+                      f"(tentativo {self._connect_attempts}, {detail}).")
+                if self.last_rx_bytes == 0:
+                    print("  ℹ️ HAT OKdo LD19: non ha RX. Filo TX (bianco) → pin fisico 10 (RXD/GPIO15), "
+                          "PWM (giallo) → pin 12. NON collegare il TX del lidar al pin 8 (TXD del Pi).")
             self.is_connected = False
             return False
         else:
