@@ -180,10 +180,11 @@ class LidarDriver:
                 except Exception:
                     pass
 
-        # 4. Nessun sensore trovato
+        # 4. Nessun sensore trovato (log al primo tentativo e poi ogni 10 per non inondare i log)
         if not self.simulated:
-            print("  ⚠️ [LIDAR-DRIVER] Nessun pacchetto LiDAR hardware rilevato sui port seriali.")
-            print("  ⏳ Rimango in modalità hardware: riproverò la sincronizzazione continua...")
+            if self._connect_attempts == 1 or self._connect_attempts % 10 == 0:
+                print(f"  ⚠️ [LIDAR-DRIVER] Nessun pacchetto LiDAR sulle porte {ports_to_try} "
+                      f"(tentativo {self._connect_attempts}): sensore spento/scollegato? Riprovo con backoff...")
             self.is_connected = False
             return False
         else:
