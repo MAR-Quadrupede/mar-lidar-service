@@ -10,6 +10,7 @@ import sys
 import time
 import json
 import signal
+import threading
 import numpy as np
 
 from lidar_driver import LidarDriver
@@ -37,6 +38,32 @@ LIDAR_PORT = os.getenv("LIDAR_PORT", "/dev/ttyAMA0")
 LIDAR_BAUD = int(os.getenv("LIDAR_BAUD", "230400"))
 LIDAR_OFFSET_DEG = float(os.getenv("LIDAR_OFFSET_DEG", "90.0"))
 SIMULATE = os.getenv("LIDAR_SIMULATE", "false").lower() in ("true", "1", "yes")
+IMU_YAW_MAX_AGE_S = float(os.getenv("LIDAR_IMU_MAX_AGE_S", "0.5"))
+
+# Ultimo yaw IMU (gradi, antiorario positivo) ricevuto da mar/imu/telemetry → prior di rotazione SLAM
+_imu_state = {"yaw_deg": None, "ts": 0.0}
+
+
+def _on_mqtt_message(client, userdata, msg):
+    try:
+        data = json.loads(msg.payload.decode("utf-8", "ignore"))
+    except Exception:
+        return
+    if msg.topic == "mar/imu/telemetry" and isinstance(data, dict):
+        yaw = data.get("yaw")
+        if yaw is None:
+            return
+        try:
+            _imu_state["yaw_deg"] = float(yaw)
+            _imu_state["ts"] = time.time()
+        except (TypeError, ValueError):
+            pass
+
+
+def _imu_yaw_for_slam(now: float):
+    if _imu_state["yaw_deg"] is None or (now - _imu_state["ts"]) > IMU_YAW_MAX_AGE_S:
+        return None
+    return _imu_state["yaw_deg"]
 
 driver = None
 running = True
@@ -65,7 +92,9 @@ def main():
     if mqtt:
         try:
             mqtt_client = mqtt.Client(client_id="mar-lidar-service")
+            mqtt_client.on_message = _on_mqtt_message
             mqtt_client.connect(MQTT_BROKER, MQTT_PORT, 60)
+            mqtt_client.subscribe("mar/imu/telemetry")
             mqtt_client.loop_start()
             print(f"  ✓ Connesso a MQTT Broker ({MQTT_BROKER}:{MQTT_PORT})")
         except Exception as e:
@@ -89,15 +118,45 @@ def main():
     last_alert_state = False
     last_map_pub_time = 0.0
     last_slam_log_time = 0.0
+    status_state = {"last_pub": 0.0}
+
+    def publish_status(now: float, scanning: bool, scan_hz: float = 0.0):
+        if not (mqtt_client and mqtt_client.is_connected()):
+            return
+        status_state["last_pub"] = now
+        mqtt_client.publish("mar/lidar/status", json.dumps({
+            "timestamp": now,
+            "connected": bool(driver.is_connected and scanning),
+            "driver": driver.driver_type,
+            "port": driver.port,
+            "baud": driver.baudrate,
+            "scan_hz": round(scan_hz, 1),
+            "slam_points": slam.get_status()["map_points_count"],
+            "imu_prior": _imu_yaw_for_slam(now) is not None,
+        }))
+
+    # Stato "offline" finché il sensore non parla (la dashboard distingue LiDAR assente da silenzio MQTT)
+    def status_heartbeat():
+        while running:
+            now = time.time()
+            if now - status_state["last_pub"] > 2.0:
+                publish_status(now, scanning=False)
+            time.sleep(1.0)
+
+    threading.Thread(target=status_heartbeat, daemon=True).start()
+
+    scan_times: list = []
 
     for scan in driver.iter_scans():
         if not running:
             break
 
         now = time.time()
+        scan_times.append(now)
+        scan_times[:] = [t for t in scan_times if now - t <= 2.0]
 
-        # 1. Aggiornamento continuo SLAM: stima posa (X, Y, Theta) e mappatura globale della stanza
-        slam_res = slam.update_scan(scan, now=now)
+        # 1. Aggiornamento continuo SLAM: posa (X, Y, Theta) con prior IMU di yaw se disponibile
+        slam_res = slam.update_scan(scan, imu_yaw_deg=_imu_yaw_for_slam(now), now=now)
 
         # 2. Analisi spaziale per settori
         analysis = analyzer.analyze_scan(scan)
@@ -123,22 +182,14 @@ def main():
             }
         }
 
-        # Payload nuvola di punti per Radar e Dashboard
-        scan_payload = {
-            "timestamp": now,
-            "point_count": len(scan),
-            "points": [[round(float(a), 1), round(float(d), 3)] for a, d in scan],
-            "front_distance_m": analysis.get("front_distance_m", 99.0),
-            "sector_mins": analysis.get("sector_mins", {}),
-            "sector_mins_en": analysis.get("sector_mins_en", {}),
-        }
-
         # Invio immediato ad alta reattività a MQTT (zero lag verso Decision Engine e Gateway)
         if mqtt_client and mqtt_client.is_connected():
             mqtt_client.publish("mar/lidar/alert", json.dumps(alert_payload, cls=NumpyEncoder))
             mqtt_client.publish("mar/lidar/telemetry", json.dumps(alert_payload, cls=NumpyEncoder))
-            mqtt_client.publish("mar/lidar/scan", json.dumps(scan_payload, cls=NumpyEncoder))
             mqtt_client.publish("mar/slam/pose", json.dumps(slam_res, cls=NumpyEncoder))
+
+        if now - status_state["last_pub"] >= 1.0:
+            publish_status(now, scanning=True, scan_hz=len(scan_times) / 2.0)
 
         if analysis["has_alert"] and (analysis["has_alert"] != last_alert_state or now - last_alert_time > 1.0):
             last_alert_time = now
@@ -175,18 +226,21 @@ def main():
             # 20° percentile: cattura ostacolo vicino senza il singolo outlier
             dist = float(sorted(vals)[max(0, len(vals) // 5)])
             downsampled.append((float(ang), round(dist, 3)))
+        # Unico payload mar/lidar/scan per scansione (prima veniva pubblicato due volte)
         radar_payload = {
             "timestamp": now,
             "points": downsampled,
             "point_count": len(scan),
             "cloud_count": len(downsampled),
             "sector_mins": analysis["sector_mins"],
+            "sector_mins_en": analysis.get("sector_mins_en", {}),
             "front_distance_m": analysis.get("front_distance_m"),
             "slam": {
                 "x_m": slam_res["x_m"],
                 "y_m": slam_res["y_m"],
                 "theta_deg": slam_res["theta_deg"],
-                "dist_traveled_m": slam_res["distance_traveled_m"]
+                "dist_traveled_m": slam_res["distance_traveled_m"],
+                "icp_ok": slam_res.get("icp_ok", True),
             }
         }
 
