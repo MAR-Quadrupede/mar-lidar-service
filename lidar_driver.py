@@ -81,6 +81,8 @@ class LidarDriver:
         seen_real = set()
         unique: List[str] = []
         for p in candidates:
+            if os.path.isdir(p):  # es. /dev/serial/ (directory by-id/by-path), non una porta
+                continue
             try:
                 real = os.path.realpath(p)
             except Exception:
