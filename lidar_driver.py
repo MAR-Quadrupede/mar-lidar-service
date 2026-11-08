@@ -30,7 +30,7 @@ class LidarDriver:
         self,
         port: str = "/dev/ttyAMA0",
         baudrate: int = 230400,
-        angle_offset_deg: float = 90.0,
+        angle_offset_deg: float = 0.0,
         simulated: bool = False
     ):
         self.port = port
@@ -306,7 +306,8 @@ class LidarDriver:
                     intensity = packet[base_idx + 2]
 
                     point_angle = (start_angle + (i * angle_step)) % 360.0
-                    # Applica offset fisico montaggio (default 90° per OKdo HAT frontale)
+                    # Montaggio: lo zero del LD06 era 90° a sinistra della prua.
+                    # Offset 0 porta il fronte vero (90° a destra del vecchio zero) su 0°.
                     curr_angle = (point_angle + self.angle_offset_deg) % 360.0
                     dist_m = dist_mm / 1000.0
 
