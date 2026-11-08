@@ -12,8 +12,10 @@ Convenzioni (coerenti con SectorAnalyzer e con la dashboard):
 
 Robustezza:
   • prior di rotazione dall'IMU (yaw) quando disponibile, altrimenti velocità costante
-  • integrazione nella mappa solo a "keyframe" (≥5 cm / ≥3° / ≥1 s) e solo con match ICP
-    sufficiente → niente inquinamento della mappa quando l'allineamento è dubbio
+  • integrazione nella mappa solo a keyframe (≥5 cm / ≥3°) e solo con match ICP
+    sufficiente. Da fermo non si reintegra: il jitter di posa sporcherebbe la mappa
+  • i salti sotto 4 mm / 0.5° sono jitter da fermo: non muovono la posa e non
+    accumulano distanza percorsa
   • limite al salto di posa per scansione (rigetta divergenze ICP)
 """
 
@@ -285,10 +287,17 @@ class LidarSlamEngine:
             self.vy *= 0.5
             self.vtheta *= 0.5
         else:
-            self.vx = (nx - self.pose_x) / dt
-            self.vy = (ny - self.pose_y) / dt
-            self.vtheta = dth / dt
-            self.total_distance_m += jump
+            # jitter ICP da fermo (pochi mm che si cancellano nella posa ma si sommano
+            # nella distanza): tienila ferma, altrimenti "incastrato" e l'odometria mentono
+            if jump < 0.004 and abs(dth) < math.radians(0.5):
+                nx, ny, nth = self.pose_x, self.pose_y, self.pose_theta
+                self.vx = self.vy = self.vtheta = 0.0
+            else:
+                self.vx = (nx - self.pose_x) / dt
+                self.vy = (ny - self.pose_y) / dt
+                self.vtheta = dth / dt
+                if jump >= 0.004:
+                    self.total_distance_m += jump
             if imu_yaw_deg is not None and self._imu_offset_rad is not None:
                 # affina lentamente l'offset IMU→mappa
                 yaw = math.radians(float(imu_yaw_deg))
@@ -304,10 +313,11 @@ class LidarSlamEngine:
             if len(self.trajectory) > 500:
                 self.trajectory = self.trajectory[-500:]
 
-        # Keyframe: integra nella mappa solo se allineati bene e ci si è mossi (o ogni 1 s)
+        # Keyframe: integra solo se allineati bene E ci si è mossi. Da fermo la stessa
+        # scansione a posa jitterata duplica le celle e allarga la stanza.
         kx, ky, kth = self._last_key_pose
         moved = math.hypot(nx - kx, ny - ky) >= 0.05 or abs((nth - kth + math.pi) % (2 * math.pi) - math.pi) >= math.radians(3.0)
-        if self.icp_ok and (moved or (t - self._last_key_time) >= 1.0):
+        if self.icp_ok and moved:
             self._integrate_into_map(self._transform_points(local, nx, ny, nth), t)
             self._last_key_pose = (nx, ny, nth)
             self._last_key_time = t
